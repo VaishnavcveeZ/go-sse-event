@@ -69,7 +69,7 @@ func CloseStore() {
 
 // eventResponseData
 
-func constructResponse(data any) eventResponseData {
+func constructResponse(data interface{}) eventResponseData {
 	b, err := json.Marshal(data)
 	if err != nil {
 		return eventResponseData("") // no event will be send
@@ -135,7 +135,7 @@ func (e *event) GetId() string {
 	return e.id
 }
 
-func (e *event) Publish(data any) bool {
+func (e *event) Publish(data interface{}) bool {
 	if e == nil || e.stream == nil {
 		return false
 	}
