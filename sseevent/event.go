@@ -78,7 +78,7 @@ func constructResponse(data interface{}) eventResponseData {
 }
 
 func (erd eventResponseData) empty() bool {
-	return erd != ""
+	return erd == ""
 }
 
 // event
