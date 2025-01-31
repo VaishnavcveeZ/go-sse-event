@@ -5,22 +5,20 @@ import (
 	"encoding/json"
 	"log"
 	"net/http"
+	"strings"
 
 	"github.com/google/uuid"
 )
 
-var (
-	store         *eventStore
-	listenersPool *listenerConnectionsPool
-)
-
 type (
-	eventStore struct {
-		events map[string]*event
+	EventStore struct {
+		events        map[string]*event
+		listenersPool *listenerConnectionsPool
 	}
 
 	event struct {
 		id          string
+		store       *EventStore
 		stream      chan eventPublishData
 		connections map[string]*listener
 	}
@@ -40,6 +38,7 @@ type (
 
 	listener struct {
 		ctx            context.Context
+		store          *EventStore
 		eventId        string
 		connectionId   string
 		connectionChan chan eventResponseData
@@ -54,39 +53,21 @@ type (
 )
 
 // eventStore
-
-func init() {
-	InitEventStore()
-}
-
-func InitEventStore() {
-	if store == nil {
-		store = &eventStore{
-			events: make(map[string]*event),
-		}
-	}
-
-	if listenersPool == nil {
-		listenersPool = &listenerConnectionsPool{
+func NewEventStoreInstance() *EventStore {
+	store := &EventStore{
+		events: make(map[string]*event),
+		listenersPool: &listenerConnectionsPool{
 			listenerConnIds: make(map[string]map[string]bool),
-		}
+		},
 	}
-}
 
-func GetEventStore() *eventStore {
-	if store == nil {
-		store = &eventStore{}
-	}
 	return store
 }
 
-func CloseStore() {
-	for id, e := range store.events {
-		for _, c := range e.connections {
-			close(c.connectionChan)
-		}
-		close(e.stream)
-		delete(store.events, id)
+func (es *EventStore) CloseStore() {
+	for id, e := range es.events {
+		es.CloseEvent(e.id)
+		delete(es.events, id)
 	}
 }
 
@@ -100,22 +81,23 @@ func constructResponse(data interface{}) eventResponseData {
 	return eventResponseData("id:" + uuid.NewString() + "\n\ndata: " + string(b) + "\n\n")
 }
 
-func (erd eventResponseData) empty() bool {
+func (erd eventResponseData) isEmpty() bool {
 	return erd == ""
 }
 
 // event
 
-func NewEvent(id string) *event {
+func (es *EventStore) newEvent(id string) *event {
 	e := &event{
 		id:          id,
+		store:       es,
 		stream:      make(chan eventPublishData),
 		connections: make(map[string]*listener),
 	}
 
 	go func() {
 		for eventData := range e.stream {
-			if eventData.data.empty() {
+			if eventData.data.isEmpty() {
 				continue
 			}
 
@@ -140,22 +122,27 @@ func NewEvent(id string) *event {
 	return e
 }
 
-func (es *eventStore) CloseEvent(id string) *event {
-
-	e, ok := es.events[id]
-	if ok {
-		close(e.stream)
-		delete(es.events, id)
-	}
-
-	return e
-}
-
-func (es *eventStore) GetEvent(id string) *event {
+func (es *EventStore) CloseEvent(id string) {
 
 	e, ok := es.events[id]
 	if !ok {
-		e = NewEvent(id)
+		return
+	}
+
+	for _, c := range e.connections {
+		close(c.connectionChan)
+	}
+
+	close(e.stream)
+	delete(es.events, id)
+}
+
+func (es *EventStore) GetEvent(id string) *event {
+	id = strings.ToLower(id)
+
+	e, ok := es.events[id]
+	if !ok {
+		e = es.newEvent(id)
 		es.events[id] = e
 	}
 
@@ -199,14 +186,22 @@ func (e *event) NewPublisher() *publisher {
 func (p *publisher) SetListeners(listenerIds ...string) *publisher {
 
 	for _, l := range listenerIds {
-		p.listenerIds[l] = true
+		if l == "" {
+			continue
+		}
+
+		p.listenerIds[strings.ToLower(l)] = true
 	}
 	return p
 }
 
-func (p *publisher) ExceptListeners(listenerIds ...string) *publisher {
+func (p *publisher) SetListenersExcept(listenerIds ...string) *publisher {
 	for _, l := range listenerIds {
-		p.exceptListenerIds[l] = true
+		if l == "" {
+			continue
+		}
+
+		p.exceptListenerIds[strings.ToLower(l)] = true
 	}
 	return p
 }
@@ -226,17 +221,17 @@ func (p *publisher) Error() error {
 	return p.err
 }
 
-// listenerPool
-func addListenerToPool(connectionsId, listenerId string) {
-	if _, ok := listenersPool.listenerConnIds[listenerId]; !ok {
-		listenersPool.listenerConnIds[listenerId] = make(map[string]bool)
+// store listenerPool
+func (es *EventStore) addListenerToPool(connectionsId, listenerId string) {
+	if _, ok := es.listenersPool.listenerConnIds[listenerId]; !ok {
+		es.listenersPool.listenerConnIds[listenerId] = make(map[string]bool)
 	}
 
-	listenersPool.listenerConnIds[listenerId][connectionsId] = true
+	es.listenersPool.listenerConnIds[listenerId][connectionsId] = true
 }
 
-func removeFromListenerPool(connectionsId, listenerId string) {
-	if liConnIds, ok := listenersPool.listenerConnIds[listenerId]; ok {
+func (es *EventStore) removeFromListenerPool(connectionsId, listenerId string) {
+	if liConnIds, ok := es.listenersPool.listenerConnIds[listenerId]; ok {
 		delete(liConnIds, connectionsId)
 	}
 }
@@ -250,6 +245,7 @@ func (e *event) Join(ctx context.Context) *listener {
 
 	l := &listener{
 		ctx:            ctx,
+		store:          e.store,
 		eventId:        e.id,
 		connectionId:   uuid.New().String(),
 		connectionChan: make(chan eventResponseData),
@@ -266,14 +262,19 @@ func (l *listener) Exit() {
 	}
 
 	if l.listenerId != "" {
-		removeFromListenerPool(l.connectionId, l.listenerId)
+		l.store.removeFromListenerPool(l.connectionId, l.listenerId)
 	}
 	close(l.connectionChan)
-	delete(store.events[l.eventId].connections, l.connectionId)
+	delete(l.store.events[l.eventId].connections, l.connectionId)
 }
 
 func (l *listener) SetListenerId(listenerId string) *listener {
-	addListenerToPool(l.connectionId, listenerId)
+	if listenerId == "" {
+		return l
+	}
+
+	listenerId = strings.ToLower(listenerId)
+	l.store.addListenerToPool(l.connectionId, listenerId)
 	l.listenerId = listenerId
 
 	return l
