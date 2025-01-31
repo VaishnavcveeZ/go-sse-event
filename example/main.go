@@ -4,7 +4,7 @@ import (
 	"net/http"
 	"strings"
 
-	"github.com/VaishnavcveeZ/go-sse-event-stream/sseevent"
+	"github.com/VaishnavcveeZ/go-sse-event/sseevent"
 
 	"github.com/gorilla/mux"
 )
